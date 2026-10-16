@@ -2,7 +2,7 @@
 
 import { ArrowLeft as arrowLeft, Database as databaseIcon } from "lucide-react";
 import useSWR from "swr";
-import { formatBytes } from "@/components/usage-bits";
+import { formatBytes, formatCores, Sparkline } from "@/components/usage-bits";
 import type { ApiMessage, DatabaseDetailData, DatabaseListItem } from "@/lib/types";
 
 const fetcher = async <T,>(url: string): Promise<T> => {
@@ -76,6 +76,16 @@ export function DatabaseList({ databases, onOpen }: { databases: DatabaseListIte
                 <dd>{item.connections}{item.maxConnections ? <small> of {item.maxConnections}</small> : null}</dd>
                 <Meter used={item.connections} total={item.maxConnections} />
               </div>
+              <div>
+                <dt>CPU</dt>
+                <dd>{item.cpuCores === null ? "—" : formatCores(item.cpuCores)}{item.plan.cpu ? <small> of {formatCores(item.plan.cpu)}</small> : null}</dd>
+                <Meter used={item.cpuCores ?? 0} total={item.plan.cpu} />
+              </div>
+              <div>
+                <dt>Memory</dt>
+                <dd>{item.memoryBytes === null ? "—" : formatBytes(item.memoryBytes)}{item.plan.memoryMb ? <small> of {formatBytes(item.plan.memoryMb * 1024 * 1024)}</small> : null}</dd>
+                <Meter used={item.memoryBytes ?? 0} total={item.plan.memoryMb ? item.plan.memoryMb * 1024 * 1024 : null} />
+              </div>
             </dl>
             <p className="database-plan">{planText(item)}</p>
           </button>
@@ -84,6 +94,18 @@ export function DatabaseList({ databases, onOpen }: { databases: DatabaseListIte
     </div>
   );
 }
+
+// "Database 12.60 GB · connection pooler 20 MB": usage is the sum of both services.
+const splitText = (
+  postgres: number | null,
+  pgbouncer: number | null | undefined,
+  format: (value: number) => string,
+): string => {
+  if (postgres === null) return "Usage data isn't available for this database yet.";
+  const parts = [`Database ${format(postgres)}`];
+  if (pgbouncer !== undefined && pgbouncer !== null) parts.push(`connection pooler ${format(pgbouncer)}`);
+  return parts.join(" · ");
+};
 
 const formatLag = (seconds: number | null): string => {
   if (seconds === null) return "Unknown";
@@ -131,12 +153,24 @@ export function DatabaseView({ id, onBack }: { id: string; onBack: () => void })
               <Meter used={data.connections} total={data.maxConnections} />
             </div>
             <div className="usage-card">
-              <span className="utility-label">CPU · Memory</span>
+              <span className="utility-label">CPU</span>
               <div className="usage-value">
-                <strong>{data.plan.cpu ? `${data.plan.cpu} vCPU` : "—"}</strong>
-                <small>{data.plan.memoryMb ? formatBytes(data.plan.memoryMb * 1024 * 1024) : ""}</small>
+                <strong>{data.cpuCores === null ? "—" : formatCores(data.cpuCores)}</strong>
+                {data.plan.cpu ? <small>of {formatCores(data.plan.cpu)}</small> : null}
               </div>
-              <small className="muted-inline">Live CPU and memory usage is coming soon.</small>
+              <Meter used={data.cpuCores ?? 0} total={data.plan.cpu} />
+              <Sparkline points={data.series.cpuCores} />
+              <small className="muted-inline">{splitText(data.breakdown.postgres.cpuCores, data.breakdown.pgbouncer?.cpuCores, formatCores)}</small>
+            </div>
+            <div className="usage-card">
+              <span className="utility-label">Memory</span>
+              <div className="usage-value">
+                <strong>{data.memoryBytes === null ? "—" : formatBytes(data.memoryBytes)}</strong>
+                {data.plan.memoryMb ? <small>of {formatBytes(data.plan.memoryMb * 1024 * 1024)}</small> : null}
+              </div>
+              <Meter used={data.memoryBytes ?? 0} total={data.plan.memoryMb ? data.plan.memoryMb * 1024 * 1024 : null} />
+              <Sparkline points={data.series.memoryBytes} />
+              <small className="muted-inline">{splitText(data.breakdown.postgres.memoryBytes, data.breakdown.pgbouncer?.memoryBytes, formatBytes)}</small>
             </div>
             {data.replica ? (
               <div className="usage-card">

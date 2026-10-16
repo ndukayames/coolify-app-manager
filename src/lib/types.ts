@@ -159,10 +159,17 @@ export type DatabaseListItem = {
   storageBytes: number;
   connections: number;
   maxConnections: number | null;
+  // Postgres + its PgBouncer combined; null until usage data exists for this database.
+  cpuCores: number | null;
+  memoryBytes: number | null;
 };
+
+export type ResourceUsage = { cpuCores: number | null; memoryBytes: number | null };
 
 export type DatabaseDetailData = DatabaseListItem & {
   databases: { name: string; sizeBytes: number; connections: number }[];
   replica: { up: boolean | null; lagSeconds: number | null } | null;
+  breakdown: { postgres: ResourceUsage; pgbouncer: ResourceUsage | null };
+  series: { cpuCores: [number, number][]; memoryBytes: [number, number][] };
   refreshedAt: string;
 };
