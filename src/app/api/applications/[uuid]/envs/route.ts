@@ -1,25 +1,27 @@
+import { NextResponse } from "next/server";
 import { apiErrorResponse, privateJson } from "@/lib/api-response";
-import { requireApiSession } from "@/lib/auth";
+import { requireTenantSession } from "@/lib/auth";
 import { CoolifyApiError, deployApplication, getEnvironmentVariables, updateEnvironmentVariables } from "@/lib/coolify";
+import { invalidateOverview } from "@/lib/overview-cache";
 import type { EnvironmentVariable } from "@/lib/types";
 
 type RouteContext = { params: Promise<{ uuid: string }> };
 
 export async function GET(_request: Request, context: RouteContext): Promise<Response> {
-  const authError = await requireApiSession();
-  if (authError) return authError;
+  const session = await requireTenantSession();
+  if (session instanceof NextResponse) return session;
 
   try {
     const { uuid } = await context.params;
-    return privateJson(await getEnvironmentVariables(uuid));
+    return privateJson(await getEnvironmentVariables(session.tenant.coolifyToken, uuid));
   } catch (error) {
     return apiErrorResponse(error);
   }
 }
 
 export async function PATCH(request: Request, context: RouteContext): Promise<Response> {
-  const authError = await requireApiSession();
-  if (authError) return authError;
+  const session = await requireTenantSession();
+  if (session instanceof NextResponse) return session;
 
   try {
     const { variables, redeploy } = (await request.json()) as {
@@ -36,11 +38,11 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
     }
 
     const { uuid } = await context.params;
-    await updateEnvironmentVariables(uuid, variables);
+    await updateEnvironmentVariables(session.tenant.coolifyToken, uuid, variables);
 
     if (redeploy === true) {
       try {
-        await deployApplication(uuid);
+        await deployApplication(session.tenant.coolifyToken, uuid);
       } catch (deployError) {
         const detail = deployError instanceof CoolifyApiError ? ` ${deployError.message}` : "";
         return privateJson(
@@ -49,6 +51,7 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
         );
       }
 
+      invalidateOverview(session.tenant.id);
       return privateJson({ message: "Environment variables saved and deployment queued." });
     }
 

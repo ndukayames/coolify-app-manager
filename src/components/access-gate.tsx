@@ -1,17 +1,18 @@
 "use client";
 
-import { ArrowRight as arrowRight, KeyRound as keyRound, ShieldCheck as shieldCheck } from "lucide-react";
+import { ArrowRight as arrowRight, KeyRound as keyRound, Mail as mail, ShieldCheck as shieldCheck } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import type { ApiMessage } from "@/lib/types";
 import type { FormEvent } from "react";
 
-export function AccessGate({ isConfigured }: { isConfigured: boolean }) {
+export function AccessGate({ variant = "client" }: { variant?: "client" | "admin" }) {
   const ArrowRight = arrowRight;
   const Key = keyRound;
+  const Mail = mail;
   const Shield = shieldCheck;
   const router = useRouter();
-  const [key, setKey] = useState<string>("");
+  const [email, setEmail] = useState<string>("");
+  const [password, setPassword] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
@@ -21,16 +22,18 @@ export function AccessGate({ isConfigured }: { isConfigured: boolean }) {
     setIsSubmitting(true);
 
     try {
-      const response = await fetch("/api/auth/login", {
+      const response = await fetch("/api/auth/sign-in/email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key }),
+        body: JSON.stringify({ email, password }),
       });
-      const body = (await response.json()) as ApiMessage;
-      if (!response.ok) throw new Error(body.message);
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { message?: string } | null;
+        throw new Error(response.status === 429 ? "Too many attempts. Try again shortly." : body?.message ?? "Sign-in failed.");
+      }
       router.refresh();
     } catch (authError) {
-      setError(authError instanceof Error ? authError.message : "Access could not be verified.");
+      setError(authError instanceof Error ? authError.message : "Sign-in failed.");
     } finally {
       setIsSubmitting(false);
     }
@@ -41,40 +44,47 @@ export function AccessGate({ isConfigured }: { isConfigured: boolean }) {
       <div className="auth-glow" />
       <section className="auth-card" aria-labelledby="access-title">
         <div className="auth-mark"><Shield size={20} /></div>
-        <span className="utility-label">Private console</span>
-        <h1 id="access-title">Enter Coolify Manager</h1>
-        <p>Use the private access key configured for this dashboard.</p>
+        <span className="utility-label">{variant === "admin" ? "Codeva staff" : "Private console"}</span>
+        <h1 id="access-title">{variant === "admin" ? "Codeva Console admin" : "Sign in to Codeva Console"}</h1>
+        <p>{variant === "admin" ? "Sign in with your Codeva admin account." : "Use the account Codeva created for you."}</p>
 
-        {isConfigured ? (
-          <form onSubmit={authenticate}>
-            <label htmlFor="access-key">Access key</label>
-            <div className="auth-input-wrap">
-              <Key size={17} />
-              <input
-                id="access-key"
-                name="access-key"
-                type="password"
-                value={key}
-                onChange={(event) => setKey(event.target.value)}
-                placeholder="Paste your access key"
-                autoComplete="current-password"
-                autoFocus
-                required
-              />
-            </div>
-            {error ? <div className="auth-error" role="alert">{error}</div> : null}
-            <button className="primary-button auth-submit" type="submit" disabled={isSubmitting}>
-              {isSubmitting ? "Verifying…" : "Continue"} <ArrowRight size={16} />
-            </button>
-          </form>
-        ) : (
-          <div className="setup-note">
-            <strong>Access key required</strong>
-            <span>Add <code>DASHBOARD_ACCESS_KEY</code> to your environment, then restart the app.</span>
+        <form method="post" onSubmit={authenticate}>
+          <label htmlFor="email">Email</label>
+          <div className="auth-input-wrap">
+            <Mail size={17} />
+            <input
+              id="email"
+              name="email"
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="you@company.com"
+              autoComplete="username"
+              autoFocus
+              required
+            />
           </div>
-        )}
+          <label htmlFor="password">Password</label>
+          <div className="auth-input-wrap">
+            <Key size={17} />
+            <input
+              id="password"
+              name="password"
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Your password"
+              autoComplete="current-password"
+              required
+            />
+          </div>
+          {error ? <div className="auth-error" role="alert">{error}</div> : null}
+          <button className="primary-button auth-submit" type="submit" disabled={isSubmitting}>
+            {isSubmitting ? "Signing in…" : "Continue"} <ArrowRight size={16} />
+          </button>
+        </form>
 
-        <small>Sessions expire after seven days. Rotating the key signs out every session.</small>
+        <small>Sessions expire after seven days.</small>
       </section>
     </main>
   );

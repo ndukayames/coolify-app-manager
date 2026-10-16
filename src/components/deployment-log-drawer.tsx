@@ -4,7 +4,7 @@ import { Check as check, Copy as copy, RefreshCw as refreshCw, TerminalSquare as
 import { useMemo, useState } from "react";
 import useSWR from "swr";
 import { StatusBadge } from "@/components/status-badge";
-import type { ApiMessage, Deployment, DeploymentLogs } from "@/lib/types";
+import type { ApiMessage, Deployment, DeploymentLogLine, DeploymentLogs } from "@/lib/types";
 
 const fetcher = async <T,>(url: string): Promise<T> => {
   const response = await fetch(url);
@@ -18,69 +18,6 @@ const fetcher = async <T,>(url: string): Promise<T> => {
 type DeploymentLogDrawerProps = {
   deployment: Deployment;
   onClose: () => void;
-};
-
-type CoolifyLogEvent = {
-  batch?: number;
-  hidden?: boolean;
-  order?: number;
-  output?: unknown;
-  timestamp?: string;
-  type?: string;
-};
-
-type DeploymentLogLine = {
-  id: string;
-  message: string;
-  timestamp: string;
-  tone: "default" | "error" | "warning";
-};
-
-const formatLogTimestamp = (timestamp?: string): string => {
-  if (!timestamp) return "";
-  const match = timestamp.match(/T(\d{2}:\d{2}:\d{2})/);
-  return match?.[1] ?? timestamp.slice(0, 8);
-};
-
-const getLogTone = (type: string | undefined, message: string): DeploymentLogLine["tone"] => {
-  const normalizedMessage = message.toLowerCase();
-  if (normalizedMessage.includes("error") || normalizedMessage.includes("failed")) return "error";
-  if (type === "stderr" || normalizedMessage.includes("warning")) return "warning";
-  return "default";
-};
-
-const parseDeploymentLogs = (source: string): DeploymentLogLine[] => {
-  try {
-    const parsed = JSON.parse(source) as unknown;
-    if (!Array.isArray(parsed)) throw new Error("Deployment logs are not an event list.");
-
-    return parsed.flatMap((value, eventIndex) => {
-      if (!value || typeof value !== "object") return [];
-      const event = value as CoolifyLogEvent;
-      if (typeof event.output !== "string") return [];
-
-      const timestamp = formatLogTimestamp(event.timestamp);
-      return event.output.split(/\r?\n/).flatMap((message, lineIndex) => {
-        if (!message.trim()) return [];
-        return [{
-          id: `${event.batch ?? 0}-${event.order ?? eventIndex}-${eventIndex}-${lineIndex}`,
-          message,
-          timestamp,
-          tone: getLogTone(event.type, message),
-        }];
-      });
-    });
-  } catch {
-    return source.split(/\r?\n/).flatMap((message, index) => {
-      if (!message.trim()) return [];
-      return [{
-        id: `plain-${index}`,
-        message,
-        timestamp: "",
-        tone: getLogTone(undefined, message),
-      }];
-    });
-  }
 };
 
 export function DeploymentLogDrawer({ deployment, onClose }: DeploymentLogDrawerProps) {
@@ -98,10 +35,7 @@ export function DeploymentLogDrawer({ deployment, onClose }: DeploymentLogDrawer
       revalidateOnFocus: true,
     },
   );
-  const logLines = useMemo<DeploymentLogLine[]>(
-    () => parseDeploymentLogs(data?.logs ?? ""),
-    [data?.logs],
-  );
+  const logLines = useMemo<DeploymentLogLine[]>(() => data?.lines ?? [], [data?.lines]);
   const copyableLogs = useMemo<string>(
     () => logLines.map((line) => (line.timestamp ? `${line.timestamp} ${line.message}` : line.message)).join("\n"),
     [logLines],
@@ -151,7 +85,6 @@ export function DeploymentLogDrawer({ deployment, onClose }: DeploymentLogDrawer
         <div className="log-metadata">
           <div><span>Status</span><StatusBadge status={deployment.status} /></div>
           <div><span>Commit</span><code>{deployment.commit}</code></div>
-          <div><span>Server</span><strong>{deployment.serverName}</strong></div>
         </div>
 
         <div className="log-toolbar">
@@ -180,8 +113,8 @@ export function DeploymentLogDrawer({ deployment, onClose }: DeploymentLogDrawer
           ) : null}
           {!isLoading && !error && logLines.length ? (
             <ol className="log-lines" aria-label="Deployment output">
-              {logLines.map((line) => (
-                <li className={`log-line log-line-${line.tone}`} key={line.id}>
+              {logLines.map((line, index) => (
+                <li className={`log-line log-line-${line.tone} log-line-${line.kind}`} key={index}>
                   <time>{line.timestamp}</time>
                   <code>{line.message}</code>
                 </li>

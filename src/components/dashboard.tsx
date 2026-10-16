@@ -5,7 +5,12 @@ import {
   AppWindow as appWindow,
   ArrowUpRight as arrowUpRight,
   Box as box,
+  ChevronRight as chevronRight,
+  Database as databaseIcon,
+  Folder as folder,
+  Layers as layers,
   FileText as fileText,
+  Gauge as gauge,
   GitBranch as gitBranch,
   KeyRound as keyRound,
   LogOut as logOut,
@@ -17,12 +22,15 @@ import {
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import useSWR from "swr";
+import { AppView } from "@/components/app-view";
+import { DatabaseList, DatabaseView } from "@/components/database-view";
 import { DeploymentLogDrawer } from "@/components/deployment-log-drawer";
 import { EnvironmentDrawer } from "@/components/environment-drawer";
 import { StatusBadge } from "@/components/status-badge";
-import type { ApiMessage, Application, Deployment, OverviewData, Project } from "@/lib/types";
+import { UsageView } from "@/components/usage-view";
+import type { ApiMessage, Application, DatabaseListItem, Deployment, OverviewData, Project } from "@/lib/types";
 
-type View = "overview" | "applications" | "deployments";
+type View = "overview" | "applications" | "deployments" | "databases" | "usage";
 
 const emptyApplications: Application[] = [];
 const emptyDeployments: Deployment[] = [];
@@ -54,6 +62,8 @@ const navItems: { id: View; label: string; icon: typeof appWindow }[] = [
   { id: "overview", label: "Overview", icon: appWindow },
   { id: "applications", label: "Applications", icon: box },
   { id: "deployments", label: "Deployments", icon: activity },
+  { id: "databases", label: "Databases", icon: databaseIcon },
+  { id: "usage", label: "Usage", icon: gauge },
 ];
 
 type ApplicationListProps = {
@@ -61,6 +71,8 @@ type ApplicationListProps = {
   deployingUuid: string | null;
   onDeploy: (application: Application) => void;
   onEnvironment: (application: Application) => void;
+  onOpen: (application: Application) => void;
+  lastDeployments: Map<string, Deployment>;
 };
 
 function EmptyState({ title, description }: { title: string; description: string }) {
@@ -73,21 +85,21 @@ function EmptyState({ title, description }: { title: string; description: string
   );
 }
 
-function ApplicationList({ applications, deployingUuid, onDeploy, onEnvironment }: ApplicationListProps) {
+function ApplicationList({ applications, deployingUuid, onDeploy, onEnvironment, onOpen, lastDeployments }: ApplicationListProps) {
   const ArrowUpRight = arrowUpRight;
   const Branch = gitBranch;
   const Key = keyRound;
   const Play = play;
 
   if (!applications.length) {
-    return <EmptyState title="No applications found" description="Applications from your Coolify instance will appear here." />;
+    return <EmptyState title="No applications found" description="Your applications will appear here." />;
   }
 
   return (
     <div className="application-list">
       {applications.map((application) => (
         <article className="application-row" key={application.uuid}>
-          <div className="app-identity">
+          <button className="app-identity app-open" onClick={() => onOpen(application)} aria-label={`Open ${application.name}`}>
             <div className="app-monogram">{application.name.slice(0, 2).toUpperCase()}</div>
             <div>
               <div className="app-name-line">
@@ -96,12 +108,17 @@ function ApplicationList({ applications, deployingUuid, onDeploy, onEnvironment 
               </div>
               <p>{application.description}</p>
             </div>
-          </div>
+          </button>
           <div className="repo-cell">
             <span><Branch size={13} /> {application.gitBranch}</span>
             <small>{getRepositoryName(application.gitRepository)}</small>
           </div>
-          <time dateTime={application.updatedAt}>{formatRelativeTime(application.updatedAt)}</time>
+          {/* Coolify bumps the app's own updated_at on every status check, so the last deploy is shown instead. */}
+          {lastDeployments.get(application.uuid) ? (
+            <time dateTime={lastDeployments.get(application.uuid)?.updatedAt} title="Last deployed">
+              {formatRelativeTime(lastDeployments.get(application.uuid)?.updatedAt ?? "")}
+            </time>
+          ) : <time title="Not deployed yet">—</time>}
           <div className="row-actions">
             {application.fqdn ? (
               <Link className="icon-button quiet" href={application.fqdn} target="_blank" aria-label={`Open ${application.name}`}>
@@ -130,11 +147,19 @@ function ApplicationList({ applications, deployingUuid, onDeploy, onEnvironment 
   );
 }
 
-function DeploymentList({ deployments, onSelect }: { deployments: Deployment[]; onSelect: (deployment: Deployment) => void }) {
+function DeploymentList({ deployments, onSelect, loading = false }: {
+  deployments: Deployment[];
+  onSelect: (deployment: Deployment) => void;
+  loading?: boolean;
+}) {
   const FileText = fileText;
 
+  if (loading) {
+    return <EmptyState title="Loading deployments…" description="Fetching the latest deploy for each application." />;
+  }
+
   if (!deployments.length) {
-    return <EmptyState title="No deployments yet" description="Your recent Coolify deployment history will appear here." />;
+    return <EmptyState title="No deployments yet" description="Your recent deployment history will appear here." />;
   }
 
   return (
@@ -153,7 +178,7 @@ function DeploymentList({ deployments, onSelect }: { deployments: Deployment[]; 
               <StatusBadge status={deployment.status} />
             </div>
             <p>{deployment.commitMessage}</p>
-            <small><code>{deployment.commit}</code> · {deployment.serverName}</small>
+            <small><code>{deployment.commit}</code></small>
           </div>
           <time dateTime={deployment.updatedAt}>{formatRelativeTime(deployment.updatedAt)}</time>
           <FileText className="deployment-open-icon" size={15} />
@@ -168,10 +193,23 @@ export function Dashboard() {
   const Search = search;
   const SignOut = logOut;
   const Close = x;
-  const { data, error, isLoading, isValidating, mutate } = useSWR<OverviewData>("/api/overview", fetcher, {
-    refreshInterval: 15_000,
+  // The app list renders first; last deploys (one Coolify call per app) fill in when ready.
+  const apps = useSWR<OverviewData>("/api/overview", fetcher, { refreshInterval: 60_000, revalidateOnFocus: true });
+  const latestDeployments = useSWR<{ deployments: Deployment[] }>("/api/overview/deployments", fetcher, {
+    // Poll quickly only while something is deploying; otherwise the data rarely changes.
+    refreshInterval: (latest) => (
+      latest?.deployments.some((deployment) => deployment.status === "in_progress" || deployment.status === "queued")
+        ? 15_000
+        : 60_000
+    ),
     revalidateOnFocus: true,
   });
+  const { data, error, isLoading } = apps;
+  const isValidating = apps.isValidating || latestDeployments.isValidating;
+  const deploymentsLoading = !latestDeployments.data && !latestDeployments.error;
+  const databasesQuery = useSWR<{ databases: DatabaseListItem[] }>("/api/databases", fetcher, { refreshInterval: 60_000 });
+  const databases = databasesQuery.data?.databases ?? [];
+  const mutate = () => Promise.all([apps.mutate(), latestDeployments.mutate(), databasesQuery.mutate()]);
   const [activeView, setActiveView] = useState<View>("overview");
   const [query, setQuery] = useState<string>("");
   const [selectedApplication, setSelectedApplication] = useState<Application | null>(null);
@@ -180,9 +218,21 @@ export function Dashboard() {
   const [serviceFilter, setServiceFilter] = useState<string>("all");
   const [deployingUuid, setDeployingUuid] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [openAppUuid, setOpenAppUuid] = useState<string | null>(null);
+  const [openDatabaseId, setOpenDatabaseId] = useState<string | null>(null);
+  // Coolify-style hierarchy: project → environment → apps.
+  const [selectedEnvironment, setSelectedEnvironment] = useState<{ projectUuid: string; environmentId: number } | null>(null);
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
 
   const applications = data?.applications ?? emptyApplications;
-  const deployments = data?.deployments ?? emptyDeployments;
+  const deployments = latestDeployments.data?.deployments ?? emptyDeployments;
+  const lastDeployments = useMemo(() => {
+    const latest = new Map<string, Deployment>();
+    for (const deployment of deployments) {
+      if (deployment.applicationUuid && !latest.has(deployment.applicationUuid)) latest.set(deployment.applicationUuid, deployment);
+    }
+    return latest;
+  }, [deployments]);
   const projects = data?.projects ?? emptyProjects;
   const runningCount = applications.filter((application) => application.status === "running").length;
   const attentionCount = applications.filter((application) => application.status === "degraded").length;
@@ -242,8 +292,64 @@ export function Dashboard() {
     }
   };
 
+  const openApp = (application: Application) => {
+    setOpenDatabaseId(null);
+    setOpenAppUuid(application.uuid);
+  };
+  const openDatabase = (id: string) => {
+    setOpenAppUuid(null);
+    setSelectedEnvironment(null);
+    setOpenDatabaseId(id);
+  };
+  const openDatabaseItem = databases.find((item) => item.id === openDatabaseId) ?? null;
+  const openApplication = applications.find((application) => application.uuid === openAppUuid) ?? null;
+  const changeView = (view: View) => {
+    setOpenAppUuid(null);
+    setOpenDatabaseId(null);
+    setSelectedEnvironment(null);
+    setActiveView(view);
+  };
+  const openEnvironment = (projectUuid: string, environmentId: number) => {
+    setOpenAppUuid(null);
+    setOpenDatabaseId(null);
+    setSelectedEnvironment({ projectUuid, environmentId });
+  };
+  const toggleProject = (projectUuid: string) => setExpandedProjects((current) => {
+    const next = new Set(current);
+    if (next.has(projectUuid)) next.delete(projectUuid);
+    else next.add(projectUuid);
+    return next;
+  });
+
+  const appCountByEnvironment = useMemo(() => {
+    const counts = new Map<number, number>();
+    for (const application of applications) {
+      if (application.environmentId !== null) counts.set(application.environmentId, (counts.get(application.environmentId) ?? 0) + 1);
+    }
+    return counts;
+  }, [applications]);
+  const environmentProject = selectedEnvironment ? projects.find((project) => project.uuid === selectedEnvironment.projectUuid) ?? null : null;
+  const environment = environmentProject?.environments.find((item) => item.id === selectedEnvironment?.environmentId) ?? null;
+  const environmentApplications = useMemo(
+    () => applications.filter((application) => application.environmentId === selectedEnvironment?.environmentId),
+    [applications, selectedEnvironment],
+  );
+  const openAppProject = openApplication ? projects.find((project) => project.uuid === openApplication.projectUuid) ?? null : null;
+  const openAppEnvironment = openAppProject?.environments.find((item) => item.id === openApplication?.environmentId) ?? null;
+  const breadcrumbs: string[] = openDatabaseId
+    ? ["Databases", openDatabaseItem?.name ?? "Database"]
+    : openApplication
+    ? [openAppProject?.name ?? "Applications", openAppEnvironment?.name ?? "", openApplication.name].filter(Boolean)
+    : environmentProject && environment
+      ? [environmentProject.name, environment.name]
+      : [{ overview: "Overview", applications: "Applications", deployments: "Deployments", databases: "Databases", usage: "Usage" }[activeView]];
+
   const signOut = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await fetch("/api/auth/sign-out", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
     window.location.reload();
   };
 
@@ -255,52 +361,100 @@ export function Dashboard() {
 
   return (
     <div className="app-shell">
-      <header className="console-header">
-        <div className="header-inner">
-          <div className="brand">
-            <span className="brand-mark"><span /><span /><span /></span>
-            <div><strong>Coolify Manager</strong><small>Private console</small></div>
-          </div>
-          <nav className="main-nav" aria-label="Main navigation">
-            {navItems.map((item) => {
-              const Icon = item.icon;
+      <aside className="sidebar" aria-label="Main navigation">
+        <div className="brand">
+          <span className="brand-mark"><span /><span /><span /></span>
+          <div><strong>Codeva Console</strong><small>{data?.instanceName ?? "Managed infrastructure"}</small></div>
+        </div>
+        <nav className="sidebar-nav">
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const active = !openApplication && !selectedEnvironment && !openDatabaseId && activeView === item.id;
+            return (
+              <button className={active ? "active" : ""} onClick={() => changeView(item.id)} key={item.id}>
+                <Icon size={15} /> {item.label}
+              </button>
+            );
+          })}
+        </nav>
+        <div className="sidebar-section">
+          <span className="sidebar-label">Projects</span>
+          {sortedProjects.map((project) => {
+            const Chevron = chevronRight;
+            const FolderIcon = folder;
+            const LayersIcon = layers;
+            const expanded = expandedProjects.has(project.uuid)
+              || selectedEnvironment?.projectUuid === project.uuid
+              || openApplication?.projectUuid === project.uuid;
+            return (
+              <div className="tree-project" key={project.uuid}>
+                <button className="tree-row" onClick={() => toggleProject(project.uuid)} aria-expanded={expanded}>
+                  <Chevron size={13} className={`tree-chevron ${expanded ? "open" : ""}`} />
+                  <FolderIcon size={14} />
+                  <span>{project.name}</span>
+                </button>
+                {expanded ? project.environments.map((item) => {
+                  const active = (selectedEnvironment?.environmentId === item.id && !openApplication) || openApplication?.environmentId === item.id;
+                  return (
+                    <button className={`tree-row tree-environment ${active ? "active" : ""}`} onClick={() => openEnvironment(project.uuid, item.id)} key={item.id}>
+                      <LayersIcon size={13} />
+                      <span>{item.name}</span>
+                      <small>{appCountByEnvironment.get(item.id) ?? 0}</small>
+                    </button>
+                  );
+                }) : null}
+              </div>
+            );
+          })}
+        </div>
+        {databases.length ? (
+          <div className="sidebar-section sidebar-section-compact">
+            <span className="sidebar-label">Databases</span>
+            {databases.map((item) => {
+              const DbIcon = databaseIcon;
               return (
-                <button className={activeView === item.id ? "active" : ""} onClick={() => setActiveView(item.id)} key={item.id}>
-                  <Icon size={15} /> {item.label}
+                <button className={`tree-row ${openDatabaseId === item.id ? "active" : ""}`} onClick={() => openDatabase(item.id)} key={item.id}>
+                  <DbIcon size={14} />
+                  <span>{item.name}</span>
+                  <small className={`tree-status ${item.up === false ? "down" : ""}`} />
                 </button>
               );
             })}
-          </nav>
-          <div className="header-actions">
-            <button className="icon-button" onClick={() => mutate()} aria-label="Refresh data" disabled={isValidating}>
-              <Refresh className={isValidating ? "spin" : ""} size={16} />
-            </button>
-            <button className="icon-button" onClick={signOut} aria-label="Sign out">
-              <SignOut size={16} />
-            </button>
           </div>
+        ) : null}
+        <div className="sidebar-footer">
+          <button className="icon-button" onClick={() => mutate()} aria-label="Refresh data" disabled={isValidating}>
+            <Refresh className={isValidating ? "spin" : ""} size={15} />
+          </button>
+          <button className="text-button sidebar-signout" onClick={signOut}><SignOut size={14} /> Sign out</button>
         </div>
-      </header>
+      </aside>
 
+      <div className="content-column">
       <main className="main-content">
         <section className="page-heading">
           <div>
-            <span className="utility-label">{data?.instanceName ?? "Coolify instance"}</span>
-            <h1>{activeView === "overview" ? "Infrastructure" : activeView === "applications" ? "Applications" : "Deployments"}</h1>
+            {breadcrumbs.length > 1 ? (
+              <nav className="breadcrumbs" aria-label="Breadcrumb">
+                {breadcrumbs.map((crumb, index) => <span key={`${crumb}-${index}`}>{crumb}</span>)}
+              </nav>
+            ) : null}
+            {openApplication || openDatabaseId ? null : <h1>{breadcrumbs[breadcrumbs.length - 1]}</h1>}
           </div>
           {data ? <span className="last-updated">Updated {formatRelativeTime(data.refreshedAt)}</span> : null}
         </section>
 
-        {error ? (
+        {/* App data comes from Coolify; the Databases pages use Grafana and render regardless. */}
+        {error && !openDatabaseId && activeView !== "databases" ? (
           <section className="page-error">
-            <div><strong>Coolify is unavailable</strong><span>{error.message}</span></div>
+            <div><strong>Service unavailable</strong><span>{error.message}</span></div>
             <button className="secondary-button" onClick={() => mutate()}>Try again</button>
           </section>
         ) : null}
 
-        {isLoading ? <DashboardSkeleton /> : null}
+        {isLoading && !openDatabaseId && activeView !== "databases" ? <DashboardSkeleton /> : null}
 
-        {!isLoading && !error && activeView === "overview" ? (
+        {!isLoading && !error && !openDatabaseId && !openApplication && !selectedEnvironment && activeView === "overview" ? (
           <div className="overview-layout">
             <section className="status-rail">
               <div className={`status-orb ${attentionCount ? "warning" : ""}`}><span /></div>
@@ -312,34 +466,36 @@ export function Dashboard() {
               <div className="status-metrics" aria-label="Instance summary">
                 <div><strong>{applications.length}</strong><span>Applications</span></div>
                 <div><strong>{runningCount}</strong><span>Running</span></div>
-                <div><strong>{deployments.length}</strong><span>Recent deploys</span></div>
+                <div><strong>{deploymentsLoading ? "…" : deployments.length}</strong><span>Recent deploys</span></div>
               </div>
             </section>
 
             <section className="panel overview-applications">
               <div className="panel-heading">
                 <div><h2>Applications</h2><p>Current runtime state</p></div>
-                <button className="text-button" onClick={() => setActiveView("applications")}>View all</button>
+                <button className="text-button" onClick={() => changeView("applications")}>View all</button>
               </div>
               <ApplicationList
                 applications={applications.slice(0, 5)}
                 deployingUuid={deployingUuid}
                 onDeploy={deploy}
                 onEnvironment={setSelectedApplication}
+                onOpen={openApp}
+                lastDeployments={lastDeployments}
               />
             </section>
 
             <section className="panel overview-deployments">
               <div className="panel-heading">
                 <div><h2>Recent activity</h2><p>Latest deployment outcomes</p></div>
-                <button className="text-button" onClick={() => setActiveView("deployments")}>View all</button>
+                <button className="text-button" onClick={() => changeView("deployments")}>View all</button>
               </div>
-              <DeploymentList deployments={deployments.slice(0, 5)} onSelect={setSelectedDeployment} />
+              <DeploymentList deployments={deployments.slice(0, 5)} onSelect={setSelectedDeployment} loading={deploymentsLoading} />
             </section>
           </div>
         ) : null}
 
-        {!isLoading && !error && activeView === "applications" ? (
+        {!isLoading && !error && !openDatabaseId && !openApplication && !selectedEnvironment && activeView === "applications" ? (
           <section className="panel page-panel">
             <div className="panel-heading panel-toolbar">
               <div><h2>All applications</h2><p>{filteredApplications.length} of {applications.length}</p></div>
@@ -359,11 +515,13 @@ export function Dashboard() {
               deployingUuid={deployingUuid}
               onDeploy={deploy}
               onEnvironment={setSelectedApplication}
+              onOpen={openApp}
+                lastDeployments={lastDeployments}
             />
           </section>
         ) : null}
 
-        {!isLoading && !error && activeView === "deployments" ? (
+        {!isLoading && !error && !openDatabaseId && !openApplication && !selectedEnvironment && activeView === "deployments" ? (
           <section className="panel page-panel">
             <div className="panel-heading deployment-toolbar">
               <div><h2>Deployment history</h2><p>{filteredDeployments.length} of {deployments.length} recent events</p></div>
@@ -400,10 +558,55 @@ export function Dashboard() {
                 </label>
               </div>
             </div>
-            <DeploymentList deployments={filteredDeployments} onSelect={setSelectedDeployment} />
+            <DeploymentList deployments={filteredDeployments} onSelect={setSelectedDeployment} loading={deploymentsLoading} />
           </section>
         ) : null}
+        {!isLoading && !error && !openDatabaseId && openApplication ? (
+          <AppView
+            key={openApplication.uuid}
+            application={openApplication}
+            deploying={deployingUuid === openApplication.uuid}
+            onBack={() => setOpenAppUuid(null)}
+            onDeploy={() => deploy(openApplication)}
+            onEnvironment={() => setSelectedApplication(openApplication)}
+            onSelectDeployment={setSelectedDeployment}
+            onNotice={setNotice}
+          />
+        ) : null}
+
+        {!isLoading && !error && !openDatabaseId && !openApplication && selectedEnvironment ? (
+          <section className="panel page-panel">
+            <div className="panel-heading">
+              <div><h2>Applications</h2><p>{environmentApplications.length} in {environment?.name ?? "this environment"}</p></div>
+            </div>
+            <ApplicationList
+              applications={environmentApplications}
+              deployingUuid={deployingUuid}
+              onDeploy={deploy}
+              onEnvironment={setSelectedApplication}
+              onOpen={openApp}
+              lastDeployments={lastDeployments}
+            />
+          </section>
+        ) : null}
+
+        {!openDatabaseId && !openApplication && !selectedEnvironment && activeView === "databases" ? (
+          databasesQuery.error
+            ? <section className="page-error"><div><strong>Databases are unavailable</strong><span>{databasesQuery.error.message}</span></div></section>
+            : !databasesQuery.data
+              ? <div className="skeleton skeleton-panel" />
+              : <DatabaseList databases={databases} onOpen={openDatabase} />
+        ) : null}
+
+        {openDatabaseId ? (
+          <DatabaseView key={openDatabaseId} id={openDatabaseId} onBack={() => changeView("databases")} />
+        ) : null}
+
+        {!isLoading && !error && !openDatabaseId && !openApplication && !selectedEnvironment && activeView === "usage" ? (
+          <UsageView onOpenApp={(uuid) => setOpenAppUuid(uuid)} />
+        ) : null}
       </main>
+      </div>
 
       {selectedApplication ? (
         <EnvironmentDrawer application={selectedApplication} onClose={() => setSelectedApplication(null)} onNotice={setNotice} />

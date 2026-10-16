@@ -361,14 +361,6 @@ export function EnvironmentDrawer({ application, onClose, onNotice }: Environmen
                         />
                         Build time
                       </label>
-                      <label className="check-field">
-                        <input
-                          type="checkbox"
-                          checked={variable.isPreview}
-                          onChange={(event) => patchVariable(variable, originalIndex, { isPreview: event.target.checked })}
-                        />
-                        Preview
-                      </label>
                       <button className="delete-button" onClick={() => removeVariable(variable, originalIndex)} aria-label={`Delete ${variable.key || "variable"}`}>
                         <Trash size={15} />
                       </button>

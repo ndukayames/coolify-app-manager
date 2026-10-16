@@ -1,4 +1,4 @@
-# Coolify Manager
+# Codeva Console
 
 A private, dark-mode console for monitoring a Coolify instance, triggering deployments, and managing application environment variables.
 
@@ -10,7 +10,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) and enter your dashboard access key. Coolify Manager does not include fallback or demo data; Coolify must be configured before application data can load.
+Open [http://localhost:3000](http://localhost:3000) and sign in with an account created by `npm run user:add`. Codeva Console does not include fallback or demo data; Coolify must be configured before application data can load.
 
 ## Connect Coolify
 

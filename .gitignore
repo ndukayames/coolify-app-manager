@@ -14,3 +14,9 @@ node_modules
 !.dev.vars.example
 
 !.env.example
+
+# SQLite (users, sessions, tenants)
+data/
+
+# TypeScript incremental build cache (breaks Nixpacks builds if committed)
+tsconfig.tsbuildinfo

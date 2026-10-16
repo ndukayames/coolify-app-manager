@@ -1,39 +1,76 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-import { cookies } from "next/headers";
+import { betterAuth } from "better-auth";
+import { headers } from "next/headers";
 import { NextResponse } from "next/server";
+import { db } from "@/lib/db";
+import { getTenant, type Tenant } from "@/lib/tenants";
 
-export const AUTH_COOKIE_NAME = "coolify_manager_session";
+// BETTER_AUTH_SECRET and BETTER_AUTH_URL are read from the environment by Better Auth.
+export const auth = betterAuth({
+  database: db,
+  emailAndPassword: {
+    enabled: true,
+    // No self-service accounts: admins create users in /admin (or scripts/) and tie them to a tenant.
+    disableSignUp: true,
+    minPasswordLength: 12,
+  },
+  user: {
+    additionalFields: {
+      // Both are set server-side only, never accepted from the client.
+      tenantId: { type: "string", required: false, input: false },
+      // "client": a client's developer, scoped to one tenant. "admin": Codeva staff, no tenant,
+      // only ever sees /admin.
+      role: { type: "string", required: false, defaultValue: "client", input: false },
+    },
+  },
+  session: {
+    expiresIn: 60 * 60 * 24 * 7,
+  },
+});
 
-const digest = (value: string): Buffer => createHash("sha256").update(value).digest();
+type SessionUser = { id: string; email: string; name: string; tenantId?: string | null; role?: string | null };
 
-const matches = (left: string, right: string): boolean => timingSafeEqual(digest(left), digest(right));
-
-export const isAccessKeyConfigured = (): boolean => Boolean(process.env.DASHBOARD_ACCESS_KEY);
-
-export const validateAccessKey = (key: string): boolean => {
-  const configuredKey = process.env.DASHBOARD_ACCESS_KEY;
-  return Boolean(configuredKey && matches(key, configuredKey));
+const currentUser = async (): Promise<SessionUser | null> => {
+  const session = await auth.api.getSession({ headers: await headers() });
+  return session ? (session.user as SessionUser) : null;
 };
 
-export const createSessionToken = (): string | null => {
-  const configuredKey = process.env.DASHBOARD_ACCESS_KEY;
-  return configuredKey ? digest(`coolify-manager:${configuredKey}`).toString("hex") : null;
+export type TenantSession = {
+  user: { id: string; email: string; name: string };
+  tenant: Tenant;
 };
 
-export const hasValidSession = async (): Promise<boolean> => {
-  const expectedToken = createSessionToken();
-  if (!expectedToken) return false;
+// Resolves a client user and their tenant. Admins, users with no tenant, and users whose
+// tenant was deleted get no access rather than a fallback.
+export const getTenantSession = async (): Promise<TenantSession | null> => {
+  const user = await currentUser();
+  if (!user || user.role === "admin") return null;
 
-  const cookieStore = await cookies();
-  const sessionToken = cookieStore.get(AUTH_COOKIE_NAME)?.value;
-  return Boolean(sessionToken && matches(sessionToken, expectedToken));
+  const tenant = user.tenantId ? getTenant(user.tenantId) : null;
+  if (!tenant) return null;
+
+  return { user: { id: user.id, email: user.email, name: user.name }, tenant };
 };
 
-export const requireApiSession = async (): Promise<NextResponse | null> => {
-  if (await hasValidSession()) return null;
+export const requireTenantSession = async (): Promise<TenantSession | NextResponse> => {
+  const session = await getTenantSession();
+  if (session) return session;
 
-  return NextResponse.json(
-    { message: isAccessKeyConfigured() ? "Authentication is required." : "Dashboard access is not configured." },
-    { status: isAccessKeyConfigured() ? 401 : 503 },
-  );
+  return NextResponse.json({ message: "Authentication is required." }, { status: 401 });
 };
+
+export type AdminSession = { user: { id: string; email: string; name: string } };
+
+export const getAdminSession = async (): Promise<AdminSession | null> => {
+  const user = await currentUser();
+  return user?.role === "admin" ? { user: { id: user.id, email: user.email, name: user.name } } : null;
+};
+
+// Admin APIs answer 404 to anyone else, so their existence isn't revealed to client users.
+export const requireAdminSession = async (): Promise<AdminSession | NextResponse> => {
+  const session = await getAdminSession();
+  if (session) return session;
+
+  return NextResponse.json({ message: "That resource was not found." }, { status: 404 });
+};
+
+export const isAdminSignedIn = async (): Promise<boolean> => (await currentUser())?.role === "admin";

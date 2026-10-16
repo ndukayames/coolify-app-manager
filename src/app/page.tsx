@@ -1,13 +1,14 @@
+import { redirect } from "next/navigation";
 import { AccessGate } from "@/components/access-gate";
 import { Dashboard } from "@/components/dashboard";
-import { hasValidSession, isAccessKeyConfigured } from "@/lib/auth";
+import { getTenantSession, isAdminSignedIn } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  if (!(await hasValidSession())) {
-    return <AccessGate isConfigured={isAccessKeyConfigured()} />;
-  }
+  // Admins have no client view; they work in /admin.
+  if (await isAdminSignedIn()) redirect("/admin");
+  if (!(await getTenantSession())) return <AccessGate />;
 
   return <Dashboard />;
 }

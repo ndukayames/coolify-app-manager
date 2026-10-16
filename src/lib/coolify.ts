@@ -1,3 +1,4 @@
+import { sanitizeDeploymentLogs } from "@/lib/deployment-logs";
 import type {
   Application,
   ApplicationStatus,
@@ -23,6 +24,7 @@ type CoolifyApplication = {
 
 type CoolifyEnvironment = {
   id: number;
+  name?: string | null;
   project_id?: number | null;
 };
 
@@ -79,27 +81,38 @@ export class CoolifyApiError extends Error {
   }
 }
 
-export const isCoolifyConfigured = (): boolean =>
-  Boolean(process.env.COOLIFY_BASE_URL && process.env.COOLIFY_API_TOKEN);
-
 const getApiBaseUrl = (): string => {
   const origin = process.env.COOLIFY_BASE_URL?.replace(/\/$/, "").replace(/\/api\/v1$/, "");
 
   if (!origin) {
-    throw new CoolifyApiError("Coolify is not configured.", 503);
+    console.error("COOLIFY_BASE_URL is not set.");
+    throw new CoolifyApiError(unavailableMessage, 503);
   }
 
   return `${origin}/api/v1`;
 };
 
-export const coolifyRequest = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
-  const token = process.env.COOLIFY_API_TOKEN;
+const unavailableMessage = "The service is temporarily unavailable. Try again shortly.";
 
-  if (!token) {
-    throw new CoolifyApiError("Coolify is not configured.", 503);
+// Users must not see upstream details (the platform name, internal errors), so each
+// upstream status maps to a neutral message. The real error is logged server-side.
+const toClientError = (status: number): CoolifyApiError => {
+  if (status === 404) return new CoolifyApiError("That resource was not found.", 404);
+  if (status === 429) return new CoolifyApiError("Too many requests. Try again shortly.", 429);
+  // Raised when a domain is already used by another resource. The upstream body names that
+  // resource, which may belong to another client, so only a generic message is returned.
+  if (status === 409) return new CoolifyApiError("That domain is already in use.", 409);
+  if (status === 400 || status === 422) {
+    return new CoolifyApiError("The request was rejected. Check your input and try again.", 400);
   }
+  // 401/403 here mean our tenant token is wrong or under-scoped, which is our problem, not the user's.
+  return new CoolifyApiError(unavailableMessage, 502);
+};
 
-  const response = await fetch(`${getApiBaseUrl()}${path}`, {
+// `token` is the caller's tenant token (see lib/tenants.ts). There is deliberately no
+// instance-wide token fallback, so a missing tenant can never widen access.
+export const coolifyRequest = async <T>(token: string, path: string, options: RequestInit = {}): Promise<T> => {
+  const send = () => fetch(`${getApiBaseUrl()}${path}`, {
     ...options,
     cache: "no-store",
     headers: {
@@ -110,12 +123,43 @@ export const coolifyRequest = async <T>(path: string, options: RequestInit = {})
     },
   });
 
+  let response: Response;
+  try {
+    response = await send();
+  } catch (networkError) {
+    // Connections to the instance occasionally time out. Reads are retried once; writes are not,
+    // because the first attempt may have reached the server (a retried deploy could run twice).
+    if ((options.method ?? "GET") !== "GET") throw networkError;
+    const cause = (networkError as Error).cause as { code?: string } | undefined;
+    console.warn(`Coolify GET ${path} failed (${cause?.code ?? (networkError as Error).message}), retrying once`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    response = await send();
+  }
+
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { message?: string } | null;
-    throw new CoolifyApiError(body?.message ?? `Coolify returned ${response.status}.`, response.status);
+    console.error(`Coolify ${options.method ?? "GET"} ${path} returned ${response.status}: ${body?.message ?? "no message"}`);
+    throw toClientError(response.status);
   }
 
   return (await response.json()) as T;
+};
+
+// Fan-out calls (one per app or project) run at most this many at a time. Firing 100 at once
+// queues on Coolify's PHP workers and slows Coolify down for every client and deploy.
+const maxParallel = 8;
+
+const mapLimit = async <T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> => {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(maxParallel, items.length) }, worker));
+  return results;
 };
 
 const normalizeApplicationStatus = (status?: string | null): ApplicationStatus => {
@@ -137,8 +181,8 @@ const normalizeDeploymentStatus = (status?: string | null): DeploymentStatus => 
   return "cancelled";
 };
 
-export const getApplications = async (): Promise<Application[]> => {
-  const applications = await coolifyRequest<CoolifyApplication[]>("/applications");
+export const getApplications = async (token: string): Promise<Application[]> => {
+  const applications = await coolifyRequest<CoolifyApplication[]>(token, "/applications");
 
   return applications.map((application) => ({
     uuid: application.uuid,
@@ -156,28 +200,33 @@ export const getApplications = async (): Promise<Application[]> => {
   }));
 };
 
-const getProjectEnvironments = async (project: CoolifyProject): Promise<CoolifyEnvironment[]> => {
+const getProjectEnvironments = async (token: string, project: CoolifyProject): Promise<CoolifyEnvironment[]> => {
   if (project.environments) return project.environments;
 
   try {
     return await coolifyRequest<CoolifyEnvironment[]>(
+      token,
       `/projects/${encodeURIComponent(project.uuid)}/environments`,
     );
   } catch (error) {
     if (!(error instanceof CoolifyApiError) || ![404, 405].includes(error.status)) throw error;
 
-    const projectDetails = await coolifyRequest<CoolifyProject>(`/projects/${encodeURIComponent(project.uuid)}`);
+    const projectDetails = await coolifyRequest<CoolifyProject>(token, `/projects/${encodeURIComponent(project.uuid)}`);
     return projectDetails.environments ?? [];
   }
 };
 
-export const getProjectContext = async (): Promise<ProjectContext> => {
-  const rawProjects = await coolifyRequest<CoolifyProject[]>("/projects");
-  const environmentsByProject = await Promise.all(rawProjects.map(getProjectEnvironments));
-  const projects = rawProjects.map((project) => ({
+export const getProjectContext = async (token: string): Promise<ProjectContext> => {
+  const rawProjects = await coolifyRequest<CoolifyProject[]>(token, "/projects");
+  const environmentsByProject = await mapLimit(rawProjects, (project) => getProjectEnvironments(token, project));
+  const projects: Project[] = rawProjects.map((project, index) => ({
     id: project.id,
     uuid: project.uuid,
     name: project.name,
+    environments: environmentsByProject[index].map((environment) => ({
+      id: environment.id,
+      name: environment.name ?? `environment-${environment.id}`,
+    })),
   }));
   const projectByEnvironmentId = new Map<number, Project>();
 
@@ -197,7 +246,6 @@ const normalizeDeployment = (deployment: CoolifyDeployment, application: Applica
     uuid,
     applicationUuid: application.uuid,
     applicationName: deployment.application_name ?? application.name,
-    serverName: deployment.server_name ?? "Default server",
     status: normalizeDeploymentStatus(deployment.status),
     commit: deployment.commit?.slice(0, 7) ?? "unknown",
     commitMessage: deployment.commit_message ?? "Deployment triggered",
@@ -208,18 +256,25 @@ const normalizeDeployment = (deployment: CoolifyDeployment, application: Applica
   };
 };
 
-export const getDeployments = async (applications: Application[]): Promise<Deployment[]> => {
-  const deploymentsByApplication = await Promise.all(
-    applications.map(async (application) => {
+// Each history item carries its full build log (~60 KB), so `take` must stay small when fetching
+// across many apps. The overview uses 1; a single app's history page uses more.
+export const getDeployments = async (token: string, applications: Application[], take = 1): Promise<Deployment[]> => {
+  const deploymentsByApplication = await mapLimit(
+    applications, async (application) => {
+      // One app's history failing should not blank the whole dashboard; it just drops out of the list.
       const history = await coolifyRequest<CoolifyDeploymentHistory>(
-        `/deployments/applications/${encodeURIComponent(application.uuid)}?skip=0&take=100`,
-      );
+        token,
+        `/deployments/applications/${encodeURIComponent(application.uuid)}?skip=0&take=${take}`,
+      ).catch((error: unknown) => {
+        console.error(`Skipping deployment history for ${application.name}: ${(error as Error).message}`);
+        return [] as CoolifyDeployment[];
+      });
       const deployments = Array.isArray(history) ? history : history.deployments ?? [];
 
       return deployments
         .map((deployment) => normalizeDeployment(deployment, application))
         .filter((deployment): deployment is Deployment => deployment !== null);
-    }),
+    },
   );
 
   return deploymentsByApplication
@@ -227,34 +282,42 @@ export const getDeployments = async (applications: Application[]): Promise<Deplo
     .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
 };
 
-export const getDeploymentLogs = async (uuid: string): Promise<DeploymentLogs> => {
-  const deployment = await coolifyRequest<CoolifyDeployment>(`/deployments/${encodeURIComponent(uuid)}`);
+export const getDeploymentLogs = async (token: string, uuid: string): Promise<DeploymentLogs> => {
+  const deployment = await coolifyRequest<CoolifyDeployment>(token, `/deployments/${encodeURIComponent(uuid)}`);
 
   return {
-    logs: deployment.logs ?? "",
+    lines: sanitizeDeploymentLogs(deployment.logs),
     refreshedAt: new Date().toISOString(),
   };
 };
 
-export const getEnvironmentVariables = async (uuid: string): Promise<EnvironmentVariable[]> => {
-  const variables = await coolifyRequest<CoolifyEnvironmentVariable[]>(`/applications/${uuid}/envs`);
+export const getEnvironmentVariables = async (token: string, uuid: string): Promise<EnvironmentVariable[]> => {
+  const variables = await coolifyRequest<CoolifyEnvironmentVariable[]>(token, `/applications/${uuid}/envs`);
 
-  return variables.map((variable) => ({
-    uuid: variable.uuid,
-    key: variable.key,
-    value: variable.value,
-    isPreview: variable.is_preview ?? false,
-    isBuildTime: variable.is_buildtime ?? false,
-    isLiteral: variable.is_literal ?? false,
-    isMultiline: variable.is_multiline ?? false,
-  }));
+  // Coolify keeps a separate row per key for preview deployments. Returning both
+  // gives us two entries with the same key, and anything that indexes by key alone
+  // (the bulk editor's Map) then resolves to the preview row and writes edits there,
+  // leaving the row the running container actually reads untouched.
+  // This manager only administers production env, so preview rows are dropped here.
+  return variables
+    .filter((variable) => (variable.is_preview ?? false) === false)
+    .map((variable) => ({
+      uuid: variable.uuid,
+      key: variable.key,
+      value: variable.value,
+      isPreview: false,
+      isBuildTime: variable.is_buildtime ?? false,
+      isLiteral: variable.is_literal ?? false,
+      isMultiline: variable.is_multiline ?? false,
+    }));
 };
 
 export const updateEnvironmentVariables = async (
+  token: string,
   uuid: string,
   variables: EnvironmentVariable[],
 ): Promise<void> => {
-  await coolifyRequest(`/applications/${uuid}/envs/bulk`, {
+  await coolifyRequest(token, `/applications/${uuid}/envs/bulk`, {
     method: "PATCH",
     body: JSON.stringify({
       data: variables.map((variable) => ({
@@ -269,5 +332,59 @@ export const updateEnvironmentVariables = async (
   });
 };
 
-export const deployApplication = async (uuid: string): Promise<{ message: string; deployment_uuid: string }> =>
-  coolifyRequest(`/applications/${uuid}/start`, { method: "POST" });
+export const deployApplication = async (token: string, uuid: string): Promise<{ message: string; deployment_uuid: string }> =>
+  coolifyRequest(token, `/applications/${uuid}/start`, { method: "POST" });
+
+// Raw application record. Only lib/app-details.ts should read this, because it contains
+// internal fields (servers, registry, labels, limits) that must never reach the browser.
+export type CoolifyApplicationDetails = Record<string, unknown> & {
+  uuid: string;
+  name: string;
+  source_id?: number | null;
+  source_type?: string | null;
+  git_repository?: string | null;
+  settings?: Record<string, unknown> | null;
+};
+
+export const getApplicationDetails = async (token: string, uuid: string): Promise<CoolifyApplicationDetails> =>
+  coolifyRequest(token, `/applications/${encodeURIComponent(uuid)}`);
+
+export const updateApplication = async (token: string, uuid: string, changes: Record<string, unknown>): Promise<void> => {
+  await coolifyRequest(token, `/applications/${encodeURIComponent(uuid)}`, {
+    method: "PATCH",
+    body: JSON.stringify(changes),
+  });
+};
+
+export type RollbackImage = { tag: string; createdAt: string; isCurrent: boolean };
+
+export const getRollbackImages = async (token: string, uuid: string): Promise<RollbackImage[]> => {
+  const body = await coolifyRequest<{ images?: { tag: string; created_at: string; is_current: boolean }[] }>(
+    token,
+    `/applications/${encodeURIComponent(uuid)}/rollback-images`,
+  );
+  return (body.images ?? []).map((image) => ({
+    tag: image.tag,
+    createdAt: image.created_at,
+    isCurrent: image.is_current,
+  }));
+};
+
+export const rollbackApplication = async (token: string, uuid: string, commit: string): Promise<{ deployment_uuid?: string }> =>
+  coolifyRequest(token, `/applications/${encodeURIComponent(uuid)}/rollback`, {
+    method: "POST",
+    body: JSON.stringify({ commit }),
+  });
+
+// Branch listing goes through the GitHub App the application was created with. A client's
+// team token may not have access to that app; callers fall back to free-text branch entry.
+export const getRepositoryBranches = async (token: string, application: CoolifyApplicationDetails): Promise<string[]> => {
+  const [owner, repo] = (application.git_repository ?? "").replace(/\.git$/, "").split("/").slice(-2);
+  if (!application.source_id || !String(application.source_type ?? "").includes("GithubApp") || !owner || !repo) return [];
+
+  const body = await coolifyRequest<{ branches?: { name?: string }[] }>(
+    token,
+    `/github-apps/${application.source_id}/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`,
+  );
+  return (body.branches ?? []).flatMap((branch) => (branch.name ? [branch.name] : []));
+};

@@ -1,34 +1,15 @@
+import { NextResponse } from "next/server";
 import { apiErrorResponse, privateJson } from "@/lib/api-response";
-import { requireApiSession } from "@/lib/auth";
-import { getApplications, getDeployments, getProjectContext } from "@/lib/coolify";
+import { requireTenantSession } from "@/lib/auth";
+import { getAppsOverview } from "@/lib/overview";
 
 export async function GET(): Promise<Response> {
-  const authError = await requireApiSession();
-  if (authError) return authError;
+  const session = await requireTenantSession();
+  if (session instanceof NextResponse) return session;
 
   try {
-    const [rawApplications, projectContext] = await Promise.all([getApplications(), getProjectContext()]);
-    const applications = rawApplications.map((application) => {
-      const project = application.environmentId === null
-        ? undefined
-        : projectContext.projectByEnvironmentId.get(application.environmentId);
-
-      return {
-        ...application,
-        projectUuid: project?.uuid ?? null,
-        projectName: project?.name ?? null,
-      };
-    });
-    const deployments = await getDeployments(applications);
-    const instanceName = new URL(process.env.COOLIFY_BASE_URL ?? "http://localhost").hostname;
-
-    return privateJson({
-      applications,
-      deployments,
-      projects: projectContext.projects,
-      instanceName,
-      refreshedAt: new Date().toISOString(),
-    });
+    const { applications, projects } = await getAppsOverview(session.tenant);
+    return privateJson({ applications, projects, instanceName: session.tenant.name, refreshedAt: new Date().toISOString() });
   } catch (error) {
     return apiErrorResponse(error);
   }
