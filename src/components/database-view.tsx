@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowLeft as arrowLeft, Database as databaseIcon } from "lucide-react";
+import { useState } from "react";
 import useSWR from "swr";
 import { formatBytes, formatCores, Sparkline } from "@/components/usage-bits";
 import type { ApiMessage, DatabaseDetailData, DatabaseListItem } from "@/lib/types";
@@ -117,6 +118,7 @@ const formatLag = (seconds: number | null): string => {
 export function DatabaseView({ id, onBack }: { id: string; onBack: () => void }) {
   const Back = arrowLeft;
   const { data, error } = useSWR<DatabaseDetailData>(`/api/databases/${id}`, fetcher, { refreshInterval: 60_000 });
+  const [tab, setTab] = useState<"overview" | "settings">("overview");
 
   return (
     <section className="app-view">
@@ -131,9 +133,16 @@ export function DatabaseView({ id, onBack }: { id: string; onBack: () => void })
         </div>
       </header>
 
+      <nav className="tab-bar" aria-label="Database sections">
+        <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>Overview</button>
+        <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>Settings</button>
+      </nav>
+
       {error ? <div className="page-error"><div><strong>Could not load this database</strong><span>{error.message}</span></div></div> : null}
 
-      {data ? (
+      {tab === "settings" ? <SettingsTab id={id} /> : null}
+
+      {data && tab === "overview" ? (
         <div className="app-tab">
           <div className="usage-grid database-overview-grid">
             <div className="usage-card">
@@ -195,5 +204,100 @@ export function DatabaseView({ id, onBack }: { id: string; onBack: () => void })
         </div>
       ) : null}
     </section>
+  );
+}
+
+type SettingsView =
+  | { available: false; message: string }
+  | {
+    available: true;
+    isStandby: boolean;
+    parameters: { name: string; label: string; description: string; group: string; value: string; applies: "reload" | "restart"; pendingRestart: boolean; customized: boolean }[];
+    overrides: { database: string; label: string; value: string }[];
+    pool: { key: string; label: string; description: string; value: string }[] | null;
+    memoryLimit: string | null;
+  };
+
+const settingGroups = ["Timeouts & logging", "Memory", "Connections & parallelism"];
+
+// Read-only for now; editing arrives with the agent's write stages.
+function SettingsTab({ id }: { id: string }) {
+  const { data, error } = useSWR<SettingsView>(`/api/databases/${id}/settings`, fetcher);
+
+  if (error) return <div className="page-error"><div><strong>Settings could not be loaded</strong><span>{error.message}</span></div></div>;
+  if (!data) return <p className="muted-note settings-loading">Loading settings…</p>;
+  if (!data.available) return <p className="muted-note settings-loading">{data.message}</p>;
+
+  const pending = data.parameters.filter((parameter) => parameter.pendingRestart);
+
+  return (
+    <div className="app-tab">
+      {pending.length ? (
+        <div className="settings-banner">
+          {pending.length} setting{pending.length === 1 ? "" : "s"} will apply on the next restart: {pending.map((parameter) => parameter.label).join(", ")}.
+        </div>
+      ) : null}
+
+      {settingGroups.map((group) => {
+        const rows = data.parameters.filter((parameter) => parameter.group === group);
+        if (!rows.length) return null;
+        return (
+          <section key={group}>
+            <div className="panel-heading"><div><h3>{group}</h3></div></div>
+            <div className="usage-table db-table">
+              {rows.map((parameter) => (
+                <div className="usage-row settings-row" key={parameter.name}>
+                  <span className="settings-name">
+                    <strong>{parameter.label}</strong>
+                    <small>{parameter.description}</small>
+                  </span>
+                  <span className="settings-value">{parameter.value}</span>
+                  <span className="settings-applies">
+                    {parameter.pendingRestart
+                      ? <span className="status-badge status-queued">Pending restart</span>
+                      : <small>{parameter.applies === "restart" ? "Applies on restart" : "Applies immediately"}</small>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        );
+      })}
+
+      {data.overrides.length ? (
+        <section>
+          <div className="panel-heading"><div><h3>Per-database overrides</h3><p>Settings that differ for a specific database</p></div></div>
+          <div className="usage-table db-table">
+            {data.overrides.map((override) => (
+              <div className="usage-row settings-row" key={`${override.database}-${override.label}`}>
+                <span className="settings-name"><strong>{override.database}</strong><small>{override.label}</small></span>
+                <span className="settings-value">{override.value}</span>
+                <span />
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {data.pool ? (
+        <section>
+          <div className="panel-heading"><div><h3>Connection pool</h3><p>PgBouncer, in front of the database</p></div></div>
+          <div className="usage-table db-table">
+            {data.pool.map((setting) => (
+              <div className="usage-row settings-row" key={setting.key}>
+                <span className="settings-name"><strong>{setting.label}</strong><small>{setting.description}</small></span>
+                <span className="settings-value">{setting.value}</span>
+                <span />
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      <p className="muted-note settings-footnote">
+        {data.isStandby ? "This is a standby replica. " : ""}
+        Memory limit: {data.memoryLimit ?? "not set"}. Changing settings from the console is coming soon.
+      </p>
+    </div>
   );
 }

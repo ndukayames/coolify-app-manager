@@ -2947,3 +2947,52 @@ button.usage-row:hover {
   height: 34px;
   padding: 0 12px;
 }
+
+/* Database settings */
+.settings-row {
+  grid-template-columns: minmax(220px, 2fr) minmax(110px, 1fr) minmax(130px, auto);
+  align-items: start;
+}
+
+.settings-name {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-name strong {
+  color: var(--ink);
+  font-weight: 560;
+}
+
+.settings-name small,
+.settings-applies small {
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+
+.settings-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.settings-applies {
+  text-align: right;
+}
+
+.settings-banner {
+  margin: 16px 20px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  background: var(--amber-soft);
+  font-size: 13px;
+}
+
+.settings-loading {
+  margin: 20px;
+}
+
+.settings-footnote {
+  margin-top: 16px;
+}
