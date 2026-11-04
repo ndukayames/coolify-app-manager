@@ -6,12 +6,15 @@ import { dirname, resolve } from "node:path";
 // In production DATABASE_PATH must sit on a persistent volume.
 // Runtime path, not a build input: tell Turbopack not to trace it.
 const databasePath = resolve(/*turbopackIgnore: true*/ process.env.DATABASE_PATH ?? "data/app.db");
-mkdirSync(dirname(databasePath), { recursive: true });
+// `next build` loads this module in parallel workers. Sharing a file makes their table setup
+// collide (SQLITE_BUSY, duplicate column), so each build worker gets its own in-memory database.
+const isBuild = process.env.NEXT_PHASE === "phase-production-build";
+if (!isBuild) mkdirSync(dirname(databasePath), { recursive: true });
 
 const globalForDb = globalThis as unknown as { sqlite?: Database.Database };
 
 // Reuse the connection across dev hot reloads instead of opening a new handle each time.
-export const db = globalForDb.sqlite ?? new Database(databasePath);
+export const db = globalForDb.sqlite ?? new Database(isBuild ? ":memory:" : databasePath);
 globalForDb.sqlite = db;
 
 db.pragma("journal_mode = WAL");
