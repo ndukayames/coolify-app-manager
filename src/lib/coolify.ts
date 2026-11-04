@@ -73,6 +73,7 @@ type CoolifyEnvironmentVariable = {
 
 export class CoolifyApiError extends Error {
   status: number;
+  retryAfterSeconds?: number;
 
   constructor(message: string, status: number) {
     super(message);
@@ -139,7 +140,9 @@ export const coolifyRequest = async <T>(token: string, path: string, options: Re
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as { message?: string } | null;
     console.error(`Coolify ${options.method ?? "GET"} ${path} returned ${response.status}: ${body?.message ?? "no message"}`);
-    throw toClientError(response.status);
+    const clientError = toClientError(response.status);
+    clientError.retryAfterSeconds = Number(response.headers.get("retry-after")) || undefined;
+    throw clientError;
   }
 
   return (await response.json()) as T;
@@ -155,7 +158,13 @@ const mapLimit = async <T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<
   const worker = async () => {
     while (next < items.length) {
       const index = next++;
-      results[index] = await fn(items[index]);
+      try {
+        results[index] = await fn(items[index]);
+      } catch (error) {
+        // Don't start the remaining calls: the whole fan-out has already failed.
+        next = items.length;
+        throw error;
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(maxParallel, items.length) }, worker));
@@ -266,6 +275,8 @@ export const getDeployments = async (token: string, applications: Application[],
         token,
         `/deployments/applications/${encodeURIComponent(application.uuid)}?skip=0&take=${take}`,
       ).catch((error: unknown) => {
+        // Rate limited: fail the fan-out so the cache keeps the last full list, not a partial one.
+        if (error instanceof CoolifyApiError && error.status === 429) throw error;
         console.error(`Skipping deployment history for ${application.name}: ${(error as Error).message}`);
         return [] as CoolifyDeployment[];
       });
@@ -282,8 +293,16 @@ export const getDeployments = async (token: string, applications: Application[],
     .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
 };
 
+// Longest a build-log request waits on Coolify's rate limit before giving up.
+const maxRetryWaitSeconds = 10;
+
 export const getDeploymentLogs = async (token: string, uuid: string): Promise<DeploymentLogs> => {
-  const deployment = await coolifyRequest<CoolifyDeployment>(token, `/deployments/${encodeURIComponent(uuid)}`);
+  const load = () => coolifyRequest<CoolifyDeployment>(token, `/deployments/${encodeURIComponent(uuid)}`);
+  const deployment = await load().catch(async (error: unknown) => {
+    if (!(error instanceof CoolifyApiError) || error.status !== 429) throw error;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(error.retryAfterSeconds ?? 2, maxRetryWaitSeconds) * 1000));
+    return load();
+  });
 
   return {
     lines: sanitizeDeploymentLogs(deployment.logs),
