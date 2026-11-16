@@ -142,7 +142,7 @@ export type DatabaseUsage = { name: string; sizeBytes: number; connections: numb
 export type UsageSummary = {
   apps: AppUsage[];
   databases: DatabaseUsage[];
-  totals: { cpuCores: number; memoryBytes: number; allocatedCpu: number; allocatedMemoryMb: number };
+  totals: { cpuCores: number; peakCpuCores24h: number | null; memoryBytes: number; allocatedCpu: number; allocatedMemoryMb: number };
 };
 
 export type DatabasePlan = { cpu: number | null; memoryMb: number | null; storageGb: number | null };

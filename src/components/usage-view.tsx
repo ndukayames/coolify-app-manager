@@ -28,7 +28,7 @@ export function UsageView({ onOpenApp }: { onOpenApp: (uuid: string) => void }) 
       <section className="usage-grid">
         <div className="usage-card">
           <span className="utility-label">Total CPU</span>
-          <div className="usage-value"><strong>{formatCores(totals.cpuCores)}</strong>{totals.allocatedCpu ? <small>{formatCores(totals.allocatedCpu)} allocated</small> : null}</div>
+          <div className="usage-value"><strong>{formatCores(totals.cpuCores)}</strong>{totals.peakCpuCores24h !== null ? <small>{formatCores(totals.peakCpuCores24h)} peak (24h)</small> : null}{totals.allocatedCpu ? <small>{formatCores(totals.allocatedCpu)} allocated</small> : null}</div>
         </div>
         <div className="usage-card">
           <span className="utility-label">Total memory</span>

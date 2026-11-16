@@ -22,12 +22,17 @@ export const getUsageSummary = async (
   const allocations = getAllocations(tenant.id);
   const clusters = listTenantDatabases(tenant.id);
 
-  const [cpu, memory, clusterSummaries] = await Promise.all([
+  const selector = apps.length ? appSelector(apps.map((app) => app.uuid)) : null;
+  const [cpu, memory, peakCpu, clusterSummaries] = await Promise.all([
     apps.length
       ? promQuery(`sum by (container_label_coolify_name) (rate(container_cpu_usage_seconds_total{${appSelector(apps.map((app) => app.uuid))}}[5m]))`, tenant.grafanaToken)
       : Promise.resolve([] as PromVector),
     apps.length
       ? promQuery(`sum by (container_label_coolify_name) (container_memory_working_set_bytes{${appSelector(apps.map((app) => app.uuid))}})`, tenant.grafanaToken)
+      : Promise.resolve([] as PromVector),
+    // Highest combined CPU across all the tenant's apps in the last 24h (5m resolution).
+    selector
+      ? promQuery(`max_over_time(sum(rate(container_cpu_usage_seconds_total{${selector}}[5m]))[24h:5m])`, tenant.grafanaToken)
       : Promise.resolve([] as PromVector),
     // One row per registered cluster (lib/databases.ts), using the same queries as the Databases page.
     Promise.all(clusters.map((cluster) => getDatabaseSummary(cluster, tenant.grafanaToken))),
@@ -56,6 +61,7 @@ export const getUsageSummary = async (
     databases,
     totals: {
       cpuCores: usage.reduce((sum, app) => sum + app.cpuCores, 0),
+      peakCpuCores24h: peakCpu.length ? Number(peakCpu[0].value[1]) : null,
       memoryBytes: usage.reduce((sum, app) => sum + app.memoryBytes, 0),
       allocatedCpu: usage.reduce((sum, app) => sum + (app.allocation?.cpu ?? 0), 0),
       allocatedMemoryMb: usage.reduce((sum, app) => sum + (app.allocation?.memoryMb ?? 0), 0),
