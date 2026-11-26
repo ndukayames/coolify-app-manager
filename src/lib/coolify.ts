@@ -74,6 +74,9 @@ type CoolifyEnvironmentVariable = {
 export class CoolifyApiError extends Error {
   status: number;
   retryAfterSeconds?: number;
+  // Field-level validation messages from a 422, e.g. "The key field format is invalid."
+  // They name fields, never values, so they are safe to log and show.
+  fieldErrors?: string[];
 
   constructor(message: string, status: number) {
     super(message);
@@ -138,9 +141,18 @@ export const coolifyRequest = async <T>(token: string, path: string, options: Re
   }
 
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { message?: string } | null;
-    console.error(`Coolify ${options.method ?? "GET"} ${path} returned ${response.status}: ${body?.message ?? "no message"}`);
+    const body = (await response.json().catch(() => null)) as
+      | { message?: string; errors?: Record<string, unknown> }
+      | null;
+    const fieldErrors = Object.values(body?.errors ?? {})
+      .flat()
+      .filter((entry): entry is string => typeof entry === "string");
+    const detail = fieldErrors.length ? ` (${fieldErrors.join(" ")})` : "";
+    console.error(
+      `Coolify ${options.method ?? "GET"} ${path} returned ${response.status}: ${body?.message ?? "no message"}${detail}`,
+    );
     const clientError = toClientError(response.status);
+    if (response.status === 422 && fieldErrors.length) clientError.fieldErrors = fieldErrors;
     clientError.retryAfterSeconds = Number(response.headers.get("retry-after")) || undefined;
     throw clientError;
   }

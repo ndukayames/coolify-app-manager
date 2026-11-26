@@ -7,6 +7,33 @@ import type { EnvironmentVariable } from "@/lib/types";
 
 type RouteContext = { params: Promise<{ uuid: string }> };
 
+// Mirrors the upstream rules for each variable, so a rejected save names the variable at fault
+// instead of failing the whole batch with no detail. Returns a message, or null when all pass.
+const KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+const BOOLEAN_FIELDS = ["isPreview", "isBuildTime", "isLiteral", "isMultiline"] as const;
+
+const findInvalidVariable = (variables: unknown[]): string | null => {
+  for (const [index, entry] of variables.entries()) {
+    const variable = entry as Partial<EnvironmentVariable> | null;
+    const position = `Variable ${index + 1}`;
+    if (!variable || typeof variable !== "object") return `${position} is not valid.`;
+
+    const key = typeof variable.key === "string" ? variable.key.trim() : "";
+    if (!key) return `${position} needs a key.`;
+    if (key.length > 255) return `${position} has a key longer than 255 characters.`;
+    if (!KEY_PATTERN.test(key)) {
+      return `${key} is not a valid name. Use letters, digits, underscores or dots, and do not start with a digit.`;
+    }
+    if (variable.value !== undefined && variable.value !== null && typeof variable.value !== "string") {
+      return `${key} must have a text value.`;
+    }
+    for (const field of BOOLEAN_FIELDS) {
+      if (variable[field] !== undefined && typeof variable[field] !== "boolean") return `${key} has an invalid setting.`;
+    }
+  }
+  return null;
+};
+
 export async function GET(_request: Request, context: RouteContext): Promise<Response> {
   const session = await requireTenantSession();
   if (session instanceof NextResponse) return session;
@@ -33,12 +60,21 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
       return privateJson({ message: "Environment variables are required." }, { status: 400 });
     }
 
-    if (variables.some((variable) => !variable.key.trim())) {
-      return privateJson({ message: "Every variable needs a key." }, { status: 400 });
-    }
+    const problem = findInvalidVariable(variables);
+    if (problem) return privateJson({ message: problem }, { status: 400 });
 
     const { uuid } = await context.params;
-    await updateEnvironmentVariables(session.tenant.coolifyToken, uuid, variables);
+    try {
+      await updateEnvironmentVariables(session.tenant.coolifyToken, uuid, variables);
+    } catch (saveError) {
+      if (saveError instanceof CoolifyApiError && saveError.fieldErrors?.length) {
+        return privateJson(
+          { message: `Environment variables were not saved: ${saveError.fieldErrors.join(" ")}` },
+          { status: 400 },
+        );
+      }
+      throw saveError;
+    }
 
     if (redeploy === true) {
       try {
